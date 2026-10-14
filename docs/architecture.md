@@ -28,22 +28,26 @@ OctoFit Tracker is a three-tier application for a school fitness program. The st
 
 ## Implementation decisions
 
-- **Presentation tier**: Keep page components responsible for rendering and user interaction; use `frontend/src/api/client.ts` for API requests. Show accessible loading, success, empty, and error states. Keep API and persistence logic out of components, and do not add authentication.
-- **Logic tier**: Keep Express routes thin and delegate validation and behavior to explicit service functions. Return the documented response shapes and deliberate 4xx errors for invalid input or missing records; do not expose database cast errors as 500s.
-- **Data tier**: Enforce required fields, types, and defaults in Mongoose schemas. Keep demo seed data idempotent with upserts; preserve unrelated records and reconcile a seeded user's old team membership when changing teams.
-- **Activity tracking**: Validate the request fields and that both IDs are well-formed and refer to existing records. Store references, type, minutes, a server-generated occurrence date, and points computed by a single deterministic service rule (initially one point per minute).
-- **Team management**: Require a nonblank name, preserve the submitted name and mascot, and default members to an empty array. Resolve member references through the data layer and return the created/listed teams in the API contract shape.
+- **Data tier first**: Define required fields and types for users (`name`, `email`, `fitnessGoal`), teams (`name`, `mascot`), activities (user/team references, `type`, `minutes`, `points`, `occurredAt`), and workouts (`focus`, `minutes`, `difficulty`). Default team members to an empty array. Seed stable demo records with upserts, preserve unrelated records, and remove a seeded user's membership from the previous team when the fixture is moved.
+- **Logic tier second**: Keep Express routes thin and delegate validation and behavior to explicit service functions. Return the documented response shapes and deliberate 4xx errors for invalid input or missing records; validate IDs before database lookups so malformed references do not become cast-error 500s.
+- **Activity tracking**: Validate the request fields and that both IDs are well-formed and refer to existing records. Store references, type, minutes, a server-generated occurrence date, and points computed by one deterministic service rule (initially one point per minute). Invalid requests must not create activities.
+- **Team management**: Require a nonblank name, preserve the submitted name and mascot, and default members to an empty array. Resolve member references through the data layer and return created/listed teams in the API contract shape.
 - **Leaderboard**: Aggregate activity points by team, sort totals descending, and assign sequential 1-based ranks. Keep aggregation in the logic tier rather than calculating it in the UI.
-- **Workout suggestions**: Find the user by email; return a 4xx if there is no match. Prefer workouts matching the user's recent activity focus, otherwise their fitness goal, and include a reason explaining the recommendation.
+- **Workout suggestions**: Find the user by email and return a 4xx if there is no match. Prefer workouts matching recent activity focus, otherwise the user's fitness goal, and include a reason explaining the recommendation.
+- **Presentation tier last**: Keep page components responsible for rendering and user interaction; use `frontend/src/api/client.ts` for API requests. Implement each capability using the shared client and expose accessible loading, success, empty, and error states. Keep API and persistence logic out of components, and do not add authentication.
+
+Implement and verify one failing contract behavior at a time. Preserve the existing API response shapes and port/proxy configuration; do not broaden the work into authentication or unrelated features.
 
 ## Test plan
 
-Run the focused contracts in dependency order, then run both builds. A failure in a tier's contract points to a violation in that tier or its documented boundary; a build failure indicates a TypeScript or bundling error.
+Run the focused contracts in dependency order, stopping to fix a tier before moving to its dependents. The data contract is the prerequisite for API behavior, and the API contract is the prerequisite for the presentation tier. A contract passes only when all of its assertions pass; after all contracts pass, both builds must succeed.
 
-| Tier/check | Command | What a failure indicates | Last observed result |
+| Order | Tier/check | Command | What a failure indicates | Baseline before implementation |
 | --- | --- | --- | --- |
-| Data | `npm run test:data --prefix octofit-tracker/backend` | Schema constraints/defaults or idempotent seed behavior do not meet the data contract. | 4 failed, 1 passed: required User, Team, Activity, and Workout validation is missing; seed contract passed. |
-| API | `npm run test:api --prefix octofit-tracker/backend` | Route/service validation or business behavior does not meet the API contract. | 4 failed: invalid activity/team requests returned 501 instead of 400, leaderboard was empty, and Mona's first workout suggestion did not match her activity/goal. |
-| Presentation | `npm test --prefix octofit-tracker/frontend` | A page does not render API data or its accessible loading, empty, or error states as required. | 15 failed: expected content and UI states were not found. |
-| Backend build | `npm run build --prefix octofit-tracker/backend` | Backend TypeScript does not type-check. | Not run yet. |
-| Frontend build | `npm run build --prefix octofit-tracker/frontend` | Frontend TypeScript or Vite production build fails. | Not run yet. |
+| 1 | Data contract | `npm run test:data --prefix octofit-tracker/backend` | Schema constraints/defaults or seed behavior fail, including repeatability, preservation of unrelated records, and reconciliation of Mona's old team membership. | 4 failed, 1 passed: required User, Team, Activity, and Workout validation is missing; seed contract passed. |
+| 2 | API contract | `npm run test:api --prefix octofit-tracker/backend` | Request validation, response shapes, activity creation/listing, team creation/listing, leaderboard totals/ranks, or user-specific suggestions violate the API contract. | 4 failed: invalid activity/team requests returned 501 instead of 400, leaderboard was empty, and Mona's first workout suggestion did not match her activity/goal. |
+| 3 | Presentation contract | `npm test --prefix octofit-tracker/frontend` | A capability page does not render API data or an accessible loading, empty, or error state, or workout suggestions do not request the seeded user. | 15 failed: expected content and UI states were not found. |
+| 4 | Backend build | `npm run build --prefix octofit-tracker/backend` | Backend TypeScript does not type-check. Run after the backend contracts pass. | Not run yet. |
+| 5 | Frontend build | `npm run build --prefix octofit-tracker/frontend` | Frontend TypeScript or Vite production build fails. Run after the presentation contract passes. | Not run yet. |
+
+For a failing test, make the smallest change in the tier that owns the behavior, rerun that tier's focused command, and then rerun downstream contracts as appropriate. The baseline column records the previously observed state; replace it with fresh results when the suites are run.
